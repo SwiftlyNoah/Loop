@@ -307,8 +307,8 @@ extension SettingsView {
             LargeButton(action: { self.favoriteFoodsIsPresented = true },
                         includeArrow: true,
                         imageView: AnyView(Image("Favorite Foods Icon").renderingMode(.template).foregroundColor(carbTintColor)),
-                        label: "Favorite Foods",
-                        descriptiveText: "Simplify Carb Entry")
+                        label: NSLocalizedString("Favorite Foods", comment: "Label for favorite foods in settings view"),
+                        descriptiveText: NSLocalizedString("Simplify Carb Entry", comment: "subheadline of favorite foods in settings view"))
         }
         .sheet(isPresented: $favoriteFoodsIsPresented) {
             FavoriteFoodsView()
