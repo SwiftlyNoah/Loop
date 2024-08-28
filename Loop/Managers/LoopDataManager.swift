@@ -364,7 +364,7 @@ final class LoopDataManager {
 
     private var retrospectiveGlucoseDiscrepancies: [GlucoseEffect]? {
         didSet {
-            retrospectiveGlucoseDiscrepanciesSummed = retrospectiveGlucoseDiscrepancies?.combinedSums(of: LoopConstants.retrospectiveCorrectionGroupingInterval * retrospectiveCorrectionGroupingIntervalMultiplier)
+            retrospectiveGlucoseDiscrepanciesSummed = retrospectiveGlucoseDiscrepancies?.combinedSums(of: LoopMath.retrospectiveCorrectionGroupingInterval * retrospectiveCorrectionGroupingIntervalMultiplier)
         }
     }
 
@@ -441,9 +441,9 @@ final class LoopDataManager {
         if lastIntegralRetrospectiveCorrectionEnabled != currentIntegralRetrospectiveCorrectionEnabled || cachedRetrospectiveCorrection == nil {
             lastIntegralRetrospectiveCorrectionEnabled = currentIntegralRetrospectiveCorrectionEnabled
             if currentIntegralRetrospectiveCorrectionEnabled {
-                cachedRetrospectiveCorrection = IntegralRetrospectiveCorrection(effectDuration: LoopSettings.retrospectiveCorrectionEffectDuration)
+                cachedRetrospectiveCorrection = IntegralRetrospectiveCorrection(effectDuration: LoopMath.retrospectiveCorrectionEffectDuration)
             } else {
-                cachedRetrospectiveCorrection = StandardRetrospectiveCorrection(effectDuration: LoopSettings.retrospectiveCorrectionEffectDuration)
+                cachedRetrospectiveCorrection = StandardRetrospectiveCorrection(effectDuration: LoopMath.retrospectiveCorrectionEffectDuration)
             }
         }
         
@@ -741,26 +741,6 @@ extension LoopDataManager {
         }
     }
 
-
-    /// Adds and stores new pump events
-    ///
-    /// - Parameters:
-    ///   - events: The pump events to add
-    ///   - completion: A closure called once upon completion
-    ///   - lastReconciliation: The date that pump events were most recently reconciled against recorded pump history. Pump events are assumed to be reflective of delivery up until this point in time. If reservoir values are recorded after this time, they may be used to supplement event based delivery.
-    ///   - error: An error explaining why the events could not be saved.
-    func addPumpEvents(_ events: [NewPumpEvent], lastReconciliation: Date?, completion: @escaping (_ error: DoseStore.DoseStoreError?) -> Void) {
-        doseStore.addPumpEvents(events, lastReconciliation: lastReconciliation) { (error) in
-            completion(error)
-            
-            self.dataAccessQueue.async {
-                if error == nil {
-                    self.clearCachedInsulinEffects()
-                }
-            }
-        }
-    }
-    
     /// Logs a new external bolus insulin dose in the DoseStore and HealthKit
     ///
     /// - Parameters:
@@ -910,8 +890,8 @@ extension LoopDataManager {
         notify(forChange: .loopFinished)
 
         if FeatureFlags.missedMealNotifications {
-            let carbEffectStart = now().addingTimeInterval(-MissedMealSettings.maxRecency)
-            carbStore.getGlucoseEffects(start: carbEffectStart, end: now(), effectVelocities: insulinCounteractionEffects) {[weak self] result in
+            let samplesStart = now().addingTimeInterval(-MissedMealSettings.maxRecency)
+            carbStore.getGlucoseEffects(start: samplesStart, end: now(), effectVelocities: insulinCounteractionEffects) {[weak self] result in
                 guard
                     let self = self,
                     case .success((_, let carbEffects)) = result
@@ -921,15 +901,28 @@ extension LoopDataManager {
                     }
                     return
                 }
-                
-                self.mealDetectionManager.generateMissedMealNotificationIfNeeded(
-                    insulinCounteractionEffects: self.insulinCounteractionEffects,
-                    carbEffects: carbEffects,
-                    pendingAutobolusUnits: self.recommendedAutomaticDose?.recommendation.bolusUnits,
-                    bolusDurationEstimator: { [unowned self] bolusAmount in
-                        return self.delegate?.loopDataManager(self, estimateBolusDuration: bolusAmount)
+
+                glucoseStore.getGlucoseSamples(start: samplesStart, end: now()) {[weak self] result in
+                    guard
+                        let self = self,
+                        case .success(let glucoseSamples) = result
+                    else {
+                        if case .failure(let error) = result {
+                            self?.logger.error("Failed to fetch glucose samples to check for missed meal: %{public}@", String(describing: error))
+                        }
+                        return
                     }
-                )
+
+                    self.mealDetectionManager.generateMissedMealNotificationIfNeeded(
+                        glucoseSamples: glucoseSamples,
+                        insulinCounteractionEffects: self.insulinCounteractionEffects,
+                        carbEffects: carbEffects,
+                        pendingAutobolusUnits: self.recommendedAutomaticDose?.recommendation.bolusUnits,
+                        bolusDurationEstimator: { [unowned self] bolusAmount in
+                            return self.delegate?.loopDataManager(self, estimateBolusDuration: bolusAmount)
+                        }
+                    )
+                }                
             }
         }
 
@@ -1005,7 +998,7 @@ extension LoopDataManager {
 
         if glucoseMomentumEffect == nil {
             updateGroup.enter()
-            glucoseStore.getRecentMomentumEffect { (result) -> Void in
+            glucoseStore.getRecentMomentumEffect(for: now()) { (result) -> Void in
                 switch result {
                 case .failure(let error):
                     self.logger.error("Failure getting recent momentum effect: %{public}@", String(describing: error))
@@ -1101,7 +1094,7 @@ extension LoopDataManager {
                     switch error {
                     case .noData:
                         // when there is no data, carbs on board is set to 0
-                        self.carbsOnBoard = CarbValue(startDate: Date(), quantity: HKQuantity(unit: .gram(), doubleValue: 0))
+                        self.carbsOnBoard = CarbValue(startDate: Date(), value: 0)
                     default:
                         self.carbsOnBoard = nil
                         warnings.append(.fetchDataWarning(.carbsOnBoard(error: error)))
@@ -1149,7 +1142,7 @@ extension LoopDataManager {
         dosingDecision.glucoseTargetRangeSchedule = settings.effectiveGlucoseTargetRangeSchedule()
 
         // These will be updated by updatePredictedGlucoseAndRecommendedDose, if possible
-        dosingDecision.predictedGlucose = predictedGlucose
+        dosingDecision.predictedGlucose = predictedGlucoseIncludingPendingInsulin
         dosingDecision.automaticDoseRecommendation = recommendedAutomaticDose?.recommendation
 
         // If the glucose prediction hasn't changed, then nothing has changed, so just use pre-existing recommendations
@@ -1594,7 +1587,7 @@ extension LoopDataManager {
             insulinSensitivity: insulinSensitivity,
             basalRate: basalRate,
             correctionRange: correctionRange,
-            retrospectiveCorrectionGroupingInterval: LoopConstants.retrospectiveCorrectionGroupingInterval
+            retrospectiveCorrectionGroupingInterval: LoopMath.retrospectiveCorrectionGroupingInterval
         )
     }
 
@@ -1605,7 +1598,7 @@ extension LoopDataManager {
         let correctionRange = settings.glucoseTargetRangeSchedule!.quantityRange(at: glucose.startDate)
 
         let retrospectiveGlucoseDiscrepancies = insulinCounteractionEffects.subtracting(carbEffects, withUniformInterval: carbStore.delta)
-        let retrospectiveGlucoseDiscrepanciesSummed = retrospectiveGlucoseDiscrepancies.combinedSums(of: LoopConstants.retrospectiveCorrectionGroupingInterval * retrospectiveCorrectionGroupingIntervalMultiplier)
+        let retrospectiveGlucoseDiscrepanciesSummed = retrospectiveGlucoseDiscrepancies.combinedSums(of: LoopMath.retrospectiveCorrectionGroupingInterval * retrospectiveCorrectionGroupingIntervalMultiplier)
         return retrospectiveCorrection.computeEffect(
             startingAt: glucose,
             retrospectiveGlucoseDiscrepanciesSummed: retrospectiveGlucoseDiscrepanciesSummed,
@@ -1613,7 +1606,7 @@ extension LoopDataManager {
             insulinSensitivity: insulinSensitivity,
             basalRate: basalRate,
             correctionRange: correctionRange,
-            retrospectiveCorrectionGroupingInterval: LoopConstants.retrospectiveCorrectionGroupingInterval
+            retrospectiveCorrectionGroupingInterval: LoopMath.retrospectiveCorrectionGroupingInterval
         )
     }
 

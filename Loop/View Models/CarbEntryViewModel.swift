@@ -59,10 +59,10 @@ final class CarbEntryViewModel: ObservableObject {
     @Published var time = Date()
     private var date = Date()
     var minimumDate: Date {
-        get { date.addingTimeInterval(.hours(-12)) }
+        get { date.addingTimeInterval(LoopConstants.maxCarbEntryPastTime) }
     }
     var maximumDate: Date {
-        get { date.addingTimeInterval(.hours(1)) }
+        get { date.addingTimeInterval(LoopConstants.maxCarbEntryFutureTime) }
     }
     
     @Published var foodType = ""
@@ -140,7 +140,7 @@ final class CarbEntryViewModel: ObservableObject {
     
     var saveFavoriteFoodButtonDisabled: Bool {
         get {
-            if let carbsQuantity, 0...maxCarbEntryQuantity.doubleValue(for: preferredCarbUnit) ~= carbsQuantity, foodType != "", selectedFavoriteFoodIndex == -1 {
+            if let carbsQuantity, 0...maxCarbEntryQuantity.doubleValue(for: preferredCarbUnit) ~= carbsQuantity, selectedFavoriteFoodIndex == -1 {
                 return false
             }
             return true
@@ -290,13 +290,14 @@ final class CarbEntryViewModel: ObservableObject {
     }
     
     private func checkIfOverrideEnabled() {
-        if let managerSettings = delegate?.settings {
-            if let overrideSettings = managerSettings.scheduleOverride?.settings, overrideSettings.effectiveInsulinNeedsScaleFactor != 1.0 {
-                self.warnings.insert(.overrideInProgress)
-            }
-            else {
-                self.warnings.remove(.overrideInProgress)
-            }
+        if let managerSettings = delegate?.settings,
+           managerSettings.scheduleOverrideEnabled(at: Date()),
+           let overrideSettings = managerSettings.scheduleOverride?.settings,
+           overrideSettings.effectiveInsulinNeedsScaleFactor != 1.0 {
+            self.warnings.insert(.overrideInProgress)
+        }
+        else {
+            self.warnings.remove(.overrideInProgress)
         }
     }
     
